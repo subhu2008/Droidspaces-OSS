@@ -121,6 +121,9 @@ static uint64_t socketd_hton64(uint64_t value) {
          (uint64_t)htonl((uint32_t)(value >> 32));
 #endif
 }
+static uint64_t socketd_ntoh64(uint64_t value) {
+  return socketd_hton64(value); //The byte swap is symmetric. Could be an alias via __attribute__
+}
 
 static int socketd_read_proc_start_ticks(pid_t pid,
                                          unsigned long long *ticks_out) {
@@ -427,6 +430,44 @@ static int socketd_append_image_record(
   return 0;
 }
 
+static int socketd_append_core_event_record(
+    struct ds_socketd_core_event_record **records_inout,
+    size_t *count_inout,
+    size_t *capacity_inout,
+    const struct ds_socketd_core_event_record *record) {
+  if (!records_inout || !count_inout || !capacity_inout || !record)
+    return -1;
+
+  if (*count_inout >= *capacity_inout) {
+    size_t old_capacity = *capacity_inout;
+    size_t new_capacity = old_capacity == 0 ? 16u : old_capacity * 2u;
+
+    if (new_capacity < old_capacity)
+      return -1;
+
+    if (new_capacity >
+        DS_SOCKETD_MAX_PAYLOAD /
+            sizeof(struct ds_socketd_core_event_record)) {
+      return -1;
+    }
+
+    struct ds_socketd_core_event_record *grown =
+        realloc(*records_inout, new_capacity * sizeof(*grown));
+    if (!grown)
+      return -1;
+
+    memset(grown + old_capacity, 0,
+           (new_capacity - old_capacity) * sizeof(*grown));
+
+    *records_inout = grown;
+    *capacity_inout = new_capacity;
+  }
+
+  (*records_inout)[*count_inout] = *record;
+  (*count_inout)++;
+  return 0;
+}
+
 static int socketd_count_installed_containers(uint32_t *count_out) {
   if (!count_out)
     return -1;
@@ -476,6 +517,15 @@ static int socketd_count_installed_containers(uint32_t *count_out) {
   closedir(containers_dir);
   *count_out = count;
   return 0;
+}
+
+static int socketd_build_core_event_path(char *path, size_t path_size) {
+  if (!path || path_size == 0)
+    return -1;
+
+  int r = snprintf(path, path_size, "%.4076s/socketd-events.bin",
+                   get_logs_dir());
+  return (r > 0 && (size_t)r < path_size) ? 0 : -1;
 }
 
 static void socketd_handle_conn(int conn) {
@@ -544,7 +594,8 @@ static void socketd_handle_conn(int conn) {
                              DS_SOCKETD_CAP_CAPABILITIES |
                              DS_SOCKETD_CAP_INFO |
                              DS_SOCKETD_CAP_LIST_CONTAINERS |
-                             DS_SOCKETD_CAP_LIST_IMAGES);
+                             DS_SOCKETD_CAP_LIST_IMAGES |
+                             DS_SOCKETD_CAP_POLL_EVENTS);
     socketd_send_response(conn, DS_SOCKETD_STATUS_OK, &caps_be,
                           (uint32_t)sizeof(caps_be));
     return;
@@ -826,6 +877,88 @@ static void socketd_handle_conn(int conn) {
       socketd_send_response(conn, DS_SOCKETD_STATUS_INTERNAL_ERROR, NULL, 0);
       return;
     }
+
+    uint32_t payload_bytes =
+        (uint32_t)(record_count * sizeof(*records));
+
+    socketd_send_response(conn, DS_SOCKETD_STATUS_OK, records,
+                          payload_bytes);
+    free(records);
+    return;
+  }
+  
+    case DS_SOCKETD_OP_POLL_EVENTS: {
+    struct ds_socketd_poll_events_req poll_req;
+    memset(&poll_req, 0, sizeof(poll_req));
+
+    /*
+     * A zero-length request means "all events currently retained".
+     */
+    if (payload_len != 0 &&
+        socketd_read_payload(conn, &poll_req,
+                             (uint32_t)sizeof(poll_req),
+                             payload_len) < 0) {
+      socketd_send_response(conn, DS_SOCKETD_STATUS_BAD_REQUEST, NULL, 0);
+      return;
+    }
+
+    int64_t since =
+        (int64_t)socketd_ntoh64((uint64_t)poll_req.since_be);
+
+    char event_path[PATH_MAX];
+    if (socketd_build_core_event_path(event_path, sizeof(event_path)) < 0) {
+      socketd_send_response(conn, DS_SOCKETD_STATUS_INTERNAL_ERROR, NULL, 0);
+      return;
+    }
+
+    FILE *f = fopen(event_path, "re");
+    if (!f) {
+      if (errno == ENOENT) {
+        socketd_send_response(conn, DS_SOCKETD_STATUS_OK, NULL, 0);
+        return;
+      }
+
+      socketd_send_response(conn, DS_SOCKETD_STATUS_INTERNAL_ERROR, NULL, 0);
+      return;
+    }
+
+    size_t capacity = 16;
+    struct ds_socketd_core_event_record *records =
+        calloc(capacity, sizeof(*records));
+    if (!records) {
+      fclose(f);
+      socketd_send_response(conn, DS_SOCKETD_STATUS_INTERNAL_ERROR, NULL, 0);
+      return;
+    }
+
+    size_t record_count = 0;
+    struct ds_socketd_core_event_record record;
+
+    while (fread(&record, sizeof(record), 1, f) == 1) {
+      int64_t record_time =
+          (int64_t)socketd_ntoh64((uint64_t)record.time_be);
+
+      if (record_time < since)
+        continue;
+
+      if (socketd_append_core_event_record(&records, &record_count,
+                                           &capacity, &record) < 0) {
+        fclose(f);
+        free(records);
+        socketd_send_response(conn, DS_SOCKETD_STATUS_INTERNAL_ERROR,
+                              NULL, 0);
+        return;
+      }
+    }
+
+    if (ferror(f)) {
+      fclose(f);
+      free(records);
+      socketd_send_response(conn, DS_SOCKETD_STATUS_INTERNAL_ERROR, NULL, 0);
+      return;
+    }
+
+    fclose(f);
 
     uint32_t payload_bytes =
         (uint32_t)(record_count * sizeof(*records));
