@@ -214,7 +214,7 @@ debug-hardened: $(OUT_DIR)
 	@echo "[*] Building hardened debug binary..."
 	@mkdir -p $(OUT_DIR)/.obj/debug
 	$(Q)$(CC) $(SRCS) -o $(OUT_DIR)/$(BINARY_NAME)-hardened \
-		-I$(SRC_DIR) -g3 -O1 -pthread -lutil \
+		-I$(SRC_DIR)/include -I$(SRC_DIR) -g3 -O1 -pthread -lutil \
 		-fsanitize=address -fsanitize=undefined -fsanitize=leak \
 		-fstack-protector-strong -D_FORTIFY_SOURCE=2 \
 		-Wall -Wextra -Wno-unused-parameter
