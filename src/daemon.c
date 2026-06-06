@@ -42,6 +42,10 @@
 #define DS_MAX_ARGC 64
 #define DS_MAX_ARG 8192
 #define DS_IOBUF 8192
+#define PTY_WBUF_MAX (256 * 1024)  /* absolute buffer cap for PTY master input \
+                                    */
+#define PTY_WBUF_HIGH (192 * 1024) /* suspend conn EPOLLIN above this */
+#define PTY_WBUF_LOW (64 * 1024)   /* resume  conn EPOLLIN below this */
 
 #define MSG_OUT ((uint8_t)0x01)
 #define MSG_ERR ((uint8_t)0x02)
@@ -461,6 +465,15 @@ static void handle_session(int conn, ds_req_t *r) {
   int exit_code = EXIT_PENDING;
   int child_done = 0; /* 0=running, 1=killed, 2=normal-exit-seen */
 
+  /* Non-blocking write buffer for PTY master input.
+   * Prevents blocking the event loop when the PTY kernel buffer is full
+   * (e.g. large paste). Excess bytes are queued here and flushed via
+   * EPOLLOUT on master. */
+  uint8_t *pty_wbuf = NULL;
+  size_t pty_wbuf_len = 0;
+  size_t pty_wbuf_cap = 0;
+  int conn_suspended = 0; /* 1 = conn EPOLLIN removed (wbuf high-water) */
+
   for (;;) {
     int nfds = epoll_wait(epfd, events, 8, -1);
     if (nfds < 0 && errno != EINTR)
@@ -497,8 +510,63 @@ static void handle_session(int conn, ds_req_t *r) {
             goto session_end;
           }
           if (type == MSG_OUT && mlen > 0 && mlen <= (uint32_t)sizeof(buf)) {
-            if (read_exact(conn, buf, mlen) == 0)
-              write_all(master, buf, mlen);
+            if (read_exact(conn, buf, mlen) == 0) {
+              /* Non-blocking write to PTY master; queue overflow into wbuf. */
+              size_t written = 0;
+              if (pty_wbuf_len == 0) {
+                /* Fast path: no pending data, try direct write first. */
+                ssize_t w = write(master, buf, mlen);
+                if (w > 0)
+                  written = (size_t)w;
+              }
+              size_t rem = mlen - written;
+              if (rem > 0) {
+                /* Buffer remainder; grow wbuf if needed (cap at PTY_WBUF_MAX).
+                 */
+                if (pty_wbuf_len + rem <= PTY_WBUF_MAX) {
+                  if (pty_wbuf_len + rem > pty_wbuf_cap) {
+                    /* Double capacity without overflow: clamp before shifting.
+                     */
+                    size_t ncap = pty_wbuf_cap ? pty_wbuf_cap : DS_IOBUF;
+                    while (ncap < pty_wbuf_len + rem) {
+                      if (ncap > PTY_WBUF_MAX / 2) {
+                        ncap = PTY_WBUF_MAX;
+                        break;
+                      }
+                      ncap *= 2;
+                    }
+                    if (ncap > PTY_WBUF_MAX)
+                      ncap = PTY_WBUF_MAX;
+                    /* Preserve old pointer on realloc failure to avoid leak. */
+                    uint8_t *nb = realloc(pty_wbuf, ncap);
+                    if (nb) {
+                      pty_wbuf = nb;
+                      pty_wbuf_cap = ncap;
+                    }
+                    /* If realloc failed, pty_wbuf unchanged; fall through to
+                     * the capacity check below which will drop the frame. */
+                  }
+                  if (pty_wbuf_len + rem <= pty_wbuf_cap) {
+                    memcpy(pty_wbuf + pty_wbuf_len, buf + written, rem);
+                    pty_wbuf_len += rem;
+                    /* Arm EPOLLOUT on master to flush wbuf. */
+                    ev.events = EPOLLIN | EPOLLOUT | EPOLLHUP | EPOLLERR;
+                    ev.data.fd = master;
+                    epoll_ctl(epfd, EPOLL_CTL_MOD, master, &ev);
+                    /* High-watermark: suspend conn input to apply backpressure.
+                     * Prevents unbounded growth; conn resumes at low-watermark.
+                     */
+                    if (!conn_suspended && pty_wbuf_len >= PTY_WBUF_HIGH) {
+                      ev.events = EPOLLHUP | EPOLLERR; /* no EPOLLIN */
+                      ev.data.fd = conn;
+                      epoll_ctl(epfd, EPOLL_CTL_MOD, conn, &ev);
+                      conn_suspended = 1;
+                    }
+                  }
+                }
+                /* wbuf full and conn suspended: no data lost, client stalls. */
+              }
+            }
           } else if (type == MSG_WINCH && mlen == 4) {
             uint16_t wd[2];
             if (read_exact(conn, wd, 4) == 0) {
@@ -515,6 +583,50 @@ static void handle_session(int conn, ds_req_t *r) {
               if (read_exact(conn, buf, c) < 0)
                 goto session_end;
               rem -= c;
+            }
+          }
+        }
+      } else if (is_pty && fd == master && (events[i].events & EPOLLOUT)) {
+        /* Flush pending wbuf to PTY master. */
+        while (pty_wbuf_len > 0) {
+          ssize_t w = write(master, pty_wbuf, pty_wbuf_len);
+          if (w > 0) {
+            pty_wbuf_len -= (size_t)w;
+            if (pty_wbuf_len > 0)
+              memmove(pty_wbuf, pty_wbuf + w, pty_wbuf_len);
+          } else if (w < 0 && errno == EAGAIN) {
+            break; /* PTY buffer still full; wait for next EPOLLOUT */
+          } else {
+            break;
+          }
+        }
+        if (pty_wbuf_len == 0) {
+          /* All flushed; stop watching for writability. */
+          ev.events = EPOLLIN | EPOLLHUP | EPOLLERR;
+          ev.data.fd = master;
+          epoll_ctl(epfd, EPOLL_CTL_MOD, master, &ev);
+        }
+        /* Low-watermark: resume conn input once pressure drops. */
+        if (conn_suspended && pty_wbuf_len < PTY_WBUF_LOW) {
+          ev.events = EPOLLIN | EPOLLHUP | EPOLLERR;
+          ev.data.fd = conn;
+          epoll_ctl(epfd, EPOLL_CTL_MOD, conn, &ev);
+          conn_suspended = 0;
+        }
+        /* Also service any pending output from master in this iteration. */
+        if (events[i].events & EPOLLIN) {
+          for (;;) {
+            ssize_t n = read(master, buf, sizeof(buf));
+            if (n > 0) {
+              if (send_frame(conn, MSG_OUT, buf, (uint32_t)n) < 0) {
+                kill(child, SIGHUP);
+                waitpid(child, NULL, 0);
+                goto session_end;
+              }
+            } else {
+              if (errno == EINTR)
+                continue;
+              break;
             }
           }
         }
@@ -582,6 +694,7 @@ static void handle_session(int conn, ds_req_t *r) {
   }
 
 session_end:
+  free(pty_wbuf);
   if (sfd >= 0) {
     epoll_ctl(epfd, EPOLL_CTL_DEL, sfd, NULL);
     close(sfd);
