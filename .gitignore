@@ -1,17 +1,14 @@
 *.o
 *.tar.gz
-droidspaces-*
-output
-.cursor
-old_code_with_android-app/
-logs/
+output/
 *.img
-*.txt
 *.patch
 *.diff
 *.rej
 *.orig
 *.config
+.cache
+.claude
 
 # Keystores
 *.keystore
