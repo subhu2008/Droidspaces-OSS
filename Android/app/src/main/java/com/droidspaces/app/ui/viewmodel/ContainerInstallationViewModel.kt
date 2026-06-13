@@ -75,6 +75,18 @@ class ContainerInstallationViewModel : ViewModel() {
     var staticNatIp: String by mutableStateOf("")
         private set
 
+    var gatewayContainer: String by mutableStateOf("")
+        private set
+
+    var gatewayNet: String by mutableStateOf("")
+        private set
+
+    var gatewayIface: String by mutableStateOf("")
+        private set
+
+    var gatewayBridge: String by mutableStateOf("")
+        private set
+
     var envFileContent: String? by mutableStateOf(null)
         private set
 
@@ -132,7 +144,11 @@ class ContainerInstallationViewModel : ViewModel() {
         portForwards: List<PortForward>,
         forceCgroupv1: Boolean,
         blockNestedNs: Boolean,
-        privileged: String
+        privileged: String,
+        gatewayContainer: String,
+        gatewayNet: String,
+        gatewayIface: String,
+        gatewayBridge: String
     ) {
         this.netMode = netMode
         this.disableIPv6 = disableIPv6
@@ -156,6 +172,10 @@ class ContainerInstallationViewModel : ViewModel() {
         this.forceCgroupv1 = forceCgroupv1
         this.blockNestedNs = blockNestedNs
         this.privileged = privileged
+        this.gatewayContainer = gatewayContainer
+        this.gatewayNet = gatewayNet
+        this.gatewayIface = gatewayIface
+        this.gatewayBridge = gatewayBridge
     }
 
     fun buildConfig(): ContainerInfo? {
@@ -187,6 +207,10 @@ class ContainerInstallationViewModel : ViewModel() {
             runAtBoot = runAtBoot,
             customInit = customInit,
             staticNatIp = staticNatIp,
+            gatewayContainer = gatewayContainer,
+            gatewayNet = gatewayNet,
+            gatewayIface = gatewayIface,
+            gatewayBridge = gatewayBridge,
             envFileContent = envFileContent,
             status = ContainerStatus.STOPPED, // Default status for new container
             useSparseImage = useSparseImage,
@@ -219,6 +243,10 @@ class ContainerInstallationViewModel : ViewModel() {
         runAtBoot = false
         customInit = ""
         staticNatIp = ""
+        gatewayContainer = ""
+        gatewayNet = ""
+        gatewayIface = ""
+        gatewayBridge = ""
         envFileContent = null
         useSparseImage = true
         sparseImageSizeGB = 8

@@ -54,6 +54,10 @@ data class ContainerInfo(
     val forceCgroupv1: Boolean = false,
     val blockNestedNs: Boolean = false,
     val staticNatIp: String = "",
+    val gatewayContainer: String = "",
+    val gatewayNet: String = "",
+    val gatewayIface: String = "",
+    val gatewayBridge: String = "",
     val privileged: String = "",
     val customInit: String = "",
     val uuid: String = ""
@@ -100,6 +104,14 @@ data class ContainerInfo(
         appendLine("block_nested_ns=${if (blockNestedNs) "1" else "0"}")
         if (netMode == "nat" && staticNatIp.isNotEmpty()) {
             appendLine("static_nat_ip=$staticNatIp")
+        }
+        // Gateway-mode keys (the C runtime parses gateway_lan_ifname, not gateway_iface).
+        // gateway_container is required in gateway mode; the rest are optional overrides.
+        if (netMode == "gateway") {
+            if (gatewayContainer.isNotBlank()) appendLine("gateway_container=$gatewayContainer")
+            if (gatewayNet.isNotBlank()) appendLine("gateway_net=$gatewayNet")
+            if (gatewayIface.isNotBlank()) appendLine("gateway_lan_ifname=$gatewayIface")
+            if (gatewayBridge.isNotBlank()) appendLine("gateway_bridge=$gatewayBridge")
         }
         appendLine("use_sparse_image=${if (useSparseImage) "1" else "0"}")
         if (sparseImageSizeGB != null) {
@@ -315,6 +327,10 @@ object ContainerManager {
                 forceCgroupv1 = configMap["force_cgroupv1"] == "1",
                 blockNestedNs = configMap["block_nested_ns"] == "1",
                 staticNatIp = configMap["static_nat_ip"] ?: "",
+                gatewayContainer = configMap["gateway_container"] ?: "",
+                gatewayNet = configMap["gateway_net"] ?: "",
+                gatewayIface = configMap["gateway_lan_ifname"] ?: "",
+                gatewayBridge = configMap["gateway_bridge"] ?: "",
                 privileged = configMap["privileged"] ?: "",
                 customInit = configMap["custom_init"] ?: "",
                 uuid = configMap["uuid"] ?: ""

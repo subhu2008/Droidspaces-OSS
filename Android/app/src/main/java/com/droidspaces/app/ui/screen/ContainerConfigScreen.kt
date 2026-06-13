@@ -28,7 +28,9 @@ import com.droidspaces.app.ui.util.ClearFocusOnClickOutside
 import androidx.compose.ui.text.style.TextOverflow
 import com.droidspaces.app.util.BindMount
 import com.droidspaces.app.util.PortForward
+import com.droidspaces.app.util.ContainerInfo
 import com.droidspaces.app.util.ContainerManager
+import com.droidspaces.app.ui.component.GatewaySettingsSection
 import kotlinx.coroutines.launch
 import com.droidspaces.app.ui.component.FilePickerDialog
 import com.droidspaces.app.ui.component.SettingsRowCard
@@ -74,6 +76,12 @@ fun ContainerConfigScreen(
     initialPrivileged: String = "",
     initialEnvFileContent: String = "",
     initialPortForwards: List<PortForward> = emptyList(),
+    initialGatewayContainer: String = "",
+    initialGatewayNet: String = "",
+    initialGatewayIface: String = "",
+    initialGatewayBridge: String = "",
+    containerName: String = "",
+    installedContainers: List<ContainerInfo> = emptyList(),
     onNext: (
         netMode: String,
         disableIPv6: Boolean,
@@ -96,7 +104,11 @@ fun ContainerConfigScreen(
         blockNestedNs: Boolean,
         privileged: String,
         envFileContent: String?,
-        portForwards: List<PortForward>
+        portForwards: List<PortForward>,
+        gatewayContainer: String,
+        gatewayNet: String,
+        gatewayIface: String,
+        gatewayBridge: String
     ) -> Unit,
     onBack: () -> Unit
 ) {
@@ -122,7 +134,22 @@ fun ContainerConfigScreen(
     var envFileContent by remember { mutableStateOf(initialEnvFileContent) }
     var portForwards by remember { mutableStateOf(initialPortForwards) }
     var privileged by remember { mutableStateOf(initialPrivileged) }
+    var gatewayContainer by remember { mutableStateOf(initialGatewayContainer) }
+    var gatewayNet by remember { mutableStateOf(initialGatewayNet) }
+    var gatewayIface by remember { mutableStateOf(initialGatewayIface) }
+    var gatewayBridge by remember { mutableStateOf(initialGatewayBridge) }
     val context = LocalContext.current
+
+    val gatewayErrors = com.droidspaces.app.util.ValidationUtils.validateGatewayConfig(
+        selfName = containerName,
+        gatewayContainer = gatewayContainer,
+        net = gatewayNet,
+        iface = gatewayIface,
+        bridge = gatewayBridge,
+        installed = installedContainers,
+        context = context
+    )
+    val canProceed = netMode != "gateway" || gatewayErrors.isValid
 
     // Internal UI States
     var showFilePicker by remember { mutableStateOf(false) }
@@ -290,14 +317,15 @@ fun ContainerConfigScreen(
                             .navigationBarsPadding()
                             .clip(btnShape)
                             .clickable(
+                                enabled = canProceed,
                                 onClick = {
-                                    onNext(netMode, disableIPv6, enableAndroidStorage, enableHwAccess, enableGpuMode, enableTermuxX11, tx11ExtraFlags, enableVirgl, virglExtraFlags, enablePulseaudio, selinuxPermissive, volatileMode, bindMounts, dnsServers, runAtBoot, customInit, staticNatIp, forceCgroupv1, blockNestedNs, privileged, if (envFileContent.isBlank()) null else envFileContent, portForwards)
+                                    onNext(netMode, disableIPv6, enableAndroidStorage, enableHwAccess, enableGpuMode, enableTermuxX11, tx11ExtraFlags, enableVirgl, virglExtraFlags, enablePulseaudio, selinuxPermissive, volatileMode, bindMounts, dnsServers, runAtBoot, customInit, staticNatIp, forceCgroupv1, blockNestedNs, privileged, if (envFileContent.isBlank()) null else envFileContent, portForwards, gatewayContainer, gatewayNet, gatewayIface, gatewayBridge)
                                 },
                                 indication = androidx.compose.material.ripple.rememberRipple(bounded = true),
                                 interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
                             ),
                         shape = btnShape,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = if (canProceed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
                         tonalElevation = 0.dp
                     ) {
                         Box(modifier = Modifier.padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
@@ -306,13 +334,13 @@ fun ContainerConfigScreen(
                                     Icons.AutoMirrored.Filled.ArrowForward,
                                     contentDescription = null,
                                     modifier = Modifier.size(18.dp),
-                                    tint = MaterialTheme.colorScheme.onPrimary
+                                    tint = if (canProceed) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                                 )
                                 Text(
                                     context.getString(R.string.next_storage),
                                     style = MaterialTheme.typography.labelLarge,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onPrimary
+                                    color = if (canProceed) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                                 )
                             }
                         }
@@ -353,10 +381,25 @@ fun ContainerConfigScreen(
             DsDropdown(
                 label = context.getString(R.string.network_mode),
                 selected = netMode,
-                options = listOf("nat", "host", "none"),
-                displayName = { context.getString(when (it) { "nat" -> R.string.network_mode_nat; "none" -> R.string.network_mode_none; else -> R.string.network_mode_host }) },
+                options = listOf("nat", "host", "none", "gateway"),
+                displayName = { context.getString(when (it) { "nat" -> R.string.network_mode_nat; "none" -> R.string.network_mode_none; "gateway" -> R.string.network_mode_gateway; else -> R.string.network_mode_host }) },
                 onSelect = { mode -> netMode = mode; if (mode != "host") disableIPv6 = false },
                 leadingIcon = Icons.Default.Public
+            )
+
+            GatewaySettingsSection(
+                visible = netMode == "gateway",
+                gatewayContainer = gatewayContainer,
+                onGatewayContainerChange = { gatewayContainer = it },
+                gatewayNet = gatewayNet,
+                onGatewayNetChange = { gatewayNet = it },
+                gatewayIface = gatewayIface,
+                onGatewayIfaceChange = { gatewayIface = it },
+                gatewayBridge = gatewayBridge,
+                onGatewayBridgeChange = { gatewayBridge = it },
+                selfName = containerName,
+                installedContainers = installedContainers,
+                errors = gatewayErrors
             )
 
             androidx.compose.animation.AnimatedVisibility(
@@ -496,6 +539,13 @@ fun ContainerConfigScreen(
                     PortForwardingList(
                         portForwards = portForwards,
                         onPortForwardsChange = { portForwards = it }
+                    )
+
+                    // Divider so the following DNS field doesn't feel disconnected.
+                    HorizontalDivider(
+                        modifier = Modifier.padding(top = 4.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f),
+                        thickness = 1.dp
                     )
                 }
             }
